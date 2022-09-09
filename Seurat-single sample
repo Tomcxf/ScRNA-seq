@@ -1,0 +1,168 @@
+library(Seurat)
+library(dplyr)
+library(patchwork)
+pbmc.data <- Read10X(data.dir = "filtered_gene_bc_matrices/hg19/")
+# Initialize the Seurat object with the raw (non-normalized data).
+# 初步过滤：每个细胞中至少检测到200个基因，每个基因至少在3个细胞中表达
+pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200)
+pbmc
+# Lets examine a few genes in the first thirty cells
+pbmc.data[c("CD3D", "TCL1A", "MS4A1"), 1:30]
+#表达矩阵中的"."表示某一基因在某一细胞中没有检测到表达，因为scRNA-seq的表达矩阵中会存在很多表达量为0的数据，Seurat会使用稀疏矩阵进行数据的存储，可以有效减少存储的内存。
+#在Seurat中可以使用PercentageFeatureSet函数计算每个细胞中线粒体的含量：在人类参考基因中线粒体基因是以“MT-”开头的，而在小鼠中是以“mt-”开头的。
+pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^MT-")
+# Show QC metrics for the first 5 cells
+head(pbmc@meta.data, 5)
+# Visualize QC metrics as a violin plot
+VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+#我们还可以使用FeatureScatter函数来对不同特征-特征之间的关系进行可视化
+plot1 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+#根据QC指标进行细胞和基因的过滤
+pbmc <- subset(pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+#归一化,归一化后的数据存放在pbmc[["RNA"]]@data里
+pbmc <- NormalizeData(pbmc, normalization.method = "LogNormalize", scale.factor = 10000)
+#Seurat使用FindVariableFeatures函数鉴定高可变基因，这些基因在PBMC不同细胞之间的表达量差异很大
+#在一些细胞中高表达，在另一些细胞中低表达）。默认情况下，会返回2,000个高可变基因用于下游的分析，如PCA等
+pbmc <- FindVariableFeatures(pbmc, selection.method = "vst", nfeatures = 2000)
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(pbmc), 10)
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(pbmc)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+#数据标准化
+#Seurat使用ScaleData函数对归一化后的count矩阵进行一个线性的变换(“scaling”)，将数据进行标准化
+#ScaleData默认对之前鉴定到的2000个高可变基因进行标准化
+#也可以通过vars.to.regress参数指定其他的变量对数据进行标准化
+#表达矩阵进行scaling后，其结果存储在pbmc[["RNA"]]@scale.data中
+pbmc <- ScaleData(pbmc)
+all.genes <- rownames(pbmc)
+pbmc <- ScaleData(pbmc, features = all.genes)
+pbmc <- ScaleData(pbmc, vars.to.regress = "percent.mt")
+#进行PCA线性降维
+#Seurat使用RunPCA函数对标准化后的表达矩阵进行PCA降维处理，默认情况下
+#只对前面选出的2000个高可变基因进行线性降维，也可以通过feature参数指定想要降维的数据集。
+pbmc <- RunPCA(pbmc, features = VariableFeatures(object = pbmc))
+# Examine and visualize PCA results a few different ways
+print(pbmc[["pca"]], dims = 1:5, nfeatures = 5)
+## PC_ 1 
+## Positive:  CST3, TYROBP, LST1, AIF1, FTL 
+## Negative:  MALAT1, LTB, IL32, IL7R, CD2 
+## PC_ 2 
+## Positive:  CD79A, MS4A1, TCL1A, HLA-DQA1, HLA-DQB1 
+## Negative:  NKG7, PRF1, CST7, GZMB, GZMA 
+## PC_ 3 
+## Positive:  HLA-DQA1, CD79A, CD79B, HLA-DQB1, HLA-DPB1 
+## Negative:  PPBP, PF4, SDPR, SPARC, GNG11 
+## PC_ 4 
+## Positive:  HLA-DQA1, CD79B, CD79A, MS4A1, HLA-DQB1 
+## Negative:  VIM, IL7R, S100A6, IL32, S100A8 
+## PC_ 5 
+## Positive:  GZMB, NKG7, S100A8, FGFBP2, GNLY 
+## Negative:  LTB, IL7R, CKB, VIM, MS4A7
+#Seurat可以使用VizDimReduction, DimPlot, 和DimHeatmap函数对PCA的结果进行可视化
+VizDimLoadings(pbmc, dims = 1:2, reduction = "pca")
+DimPlot(pbmc, reduction = "pca")
+DimHeatmap(pbmc, dims = 1, cells = 500, balanced = TRUE)
+DimHeatmap(pbmc, dims = 1:15, cells = 500, balanced = TRUE)
+#选择PCA降维的维数用于后续的分析
+#Seurat可以使用两种方法确定PCA降维的维数用于后续的聚类分析：
+#1.使用JackStrawPlot函数
+#使用JackStraw函数计算每个PC的P值的分布，显著的PC会有较低的p-value
+pbmc <- JackStraw(pbmc, num.replicate = 100)
+pbmc <- ScoreJackStraw(pbmc, dims = 1:20)
+# 使用JackStrawPlot函数进行可视化
+JackStrawPlot(pbmc, dims = 1:15)
+#使用ElbowPlot函数
+#使用ElbowPlot函数查看在哪一个PC处出现平滑的挂点：
+ElbowPlot(pbmc)
+#细胞的聚类分群
+#Seurat使用图聚类的方法对降维后的表达数据进行聚类分群
+pbmc <- FindNeighbors(pbmc, dims = 1:10)
+pbmc <- FindClusters(pbmc, resolution = 0.5)
+## Modularity Optimizer version 1.3.0 by Ludo Waltman and Nees Jan van Eck
+## 
+## Number of nodes: 2638
+## Number of edges: 96033
+## 
+## Running Louvain algorithm...
+## Maximum modularity in 10 random starts: 0.8720
+## Number of communities: 9
+## Elapsed time: 0 seconds
+# Look at cluster IDs of the first 5 cells
+head(Idents(pbmc), 5)
+## AAACATACAACCAC AAACATTGAGCTAC AAACATTGATCAGC AAACCGTGCTTCCG AAACCGTGTATGCG 
+##              1              3              1              2              6 
+## Levels: 0 1 2 3 4 5 6 7 8
+#非线性降维可视化（UMAP/tSNE）
+# If you haven't installed UMAP, 
+#you can do so via reticulate::py_install(packages = 'umap-learn')
+# UMAP降维可视化
+pbmc <- RunUMAP(pbmc, dims = 1:10)
+# note that you can set `label = TRUE` or use the LabelClusters function to help label individual clusters
+DimPlot(pbmc, reduction = "umap")
+#tSNE降维可视化
+pbmc <- RunTSNE(pbmc, dims = 1:10)
+DimPlot(pbmc, reduction = "tsne", label = TRUE)
+#Seurat使用FindMarkers和FindAllMarkers函数进行差异表达基因的筛选
+#可以通过test.use参数指定不同的差异表达基因筛选的方法。
+# find all markers of cluster 1
+cluster1.markers <- FindMarkers(pbmc, ident.1 = 1, min.pct = 0.25)
+head(cluster1.markers, n = 5)
+p_val    avg_logFC   pct.1   pct.2   p_val_adj
+IL32    0   0.8373872   0.948   0.464   0
+LTB    0   0.8921170   0.981   0.642   0
+CD3D    0   0.6436286   0.919   0.431   0
+IL7R    0   0.8147082   0.747   0.325   0
+LDHB    0   0.6253110   0.950   0.613   0
+# find all markers distinguishing cluster 5 from clusters 0 and 3
+cluster5.markers <- FindMarkers(pbmc, ident.1 = 5, ident.2 = c(0, 3), min.pct = 0.25)
+head(cluster5.markers, n = 5)
+p_val    avg_logFC   pct.1   pct.2   p_val_adj
+FCGR3A    0   2.963144    0.975   0.037   0
+IFITM3    0   2.698187    0.975   0.046   0
+CFD    0   2.362381    0.938   0.037   0
+CD68    0   2.087366    0.926   0.036   0
+RP11-290F20.3    0   1.886288    0.840   0.016   0
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+pbmc.markers <- FindAllMarkers(pbmc, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+pbmc.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+p_val    avg_logFC   pct.1   pct.2   p_val_adj   cluster gene
+0    0.7300635   0.901   0.594   0   0   LDHB
+0    0.9219135   0.436   0.110   0   0   CCR7
+0    0.8921170   0.981   0.642   0   1   LTB
+0    0.8586034   0.422   0.110   0   1   AQP3
+0    3.8608733   0.996   0.215   0   2   S100A9
+0    3.7966403   0.975   0.121   0   2   S100A8
+0    2.9875833   0.936   0.041   0   3   CD79A
+0    2.4894932   0.622   0.022   0   3   TCL1A
+0    2.1220555   0.985   0.240   0   4   CCL5
+0    2.0461687   0.587   0.059   0   4   GZMK
+0    2.2954931   0.975   0.134   0   5   FCGR3A
+0    2.1388125   1.000   0.315   0   5   LST1
+0    3.3462278   0.961   0.068   0   6   GZMB
+0    3.6898996   0.961   0.131   0   6   GNLY
+0    2.6832771   0.812   0.011   0   7   FCER1A
+0    1.9924275   1.000   0.513   0   7   HLA-DPB1
+0    5.0207262   1.000   0.010   0   8   PF4
+0    5.9443347   1.000   0.024   0   8   PPBP
+#Marker基因的可视化
+#Seurat可以使用VlnPlot，FeaturePlot，RidgePlot，DotPlot和DoHeatmap等函数对marker基因的表达进行可视化
+VlnPlot(pbmc, features = c("MS4A1", "CD79A"))
+# you can plot raw counts as well
+VlnPlot(pbmc, features = c("NKG7", "PF4"), slot = "counts", log = TRUE)
+FeaturePlot(pbmc, features = c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", "FCGR3A", "LYZ", "PPBP", "CD8A"))
+RidgePlot(pbmc, features = c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", "FCGR3A", "LYZ", "PPBP", "CD8A"))
+top10 <- pbmc.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+DoHeatmap(pbmc, features = top10$gene) + NoLegend()
+#对聚类后的不同类群进行注释
+# 根据marker基因进行分群注释
+new.cluster.ids <- c("Naive CD4 T", "Memory CD4 T", "CD14+ Mono", "B", "CD8 T", "FCGR3A+ Mono", "NK", "DC", "Platelet")
+names(new.cluster.ids) <- levels(pbmc)
+# 细胞分群的重命名
+pbmc <- RenameIdents(pbmc, new.cluster.ids)
+DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+# 保存分析的结果
+saveRDS(pbmc, file = "../output/pbmc3k_final.rds")
