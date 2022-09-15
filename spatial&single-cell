@@ -1,0 +1,148 @@
+# 使用devtools进行安装
+devtools::install_github("satijalab/seurat", ref = "spatial")
+devtools::install_github('satijalab/seurat-data')
+library(Seurat)
+library(SeuratData)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+# 使用SeuratData包安装小鼠大脑的空间转录组数据
+InstallData("stxBrain")
+library(stxBrain.SeuratData)
+# 使用LoadData函数加载数据集
+brain <- LoadData("stxBrain", type = "anterior1")
+brain
+#An object of class Seurat 
+#31053 features across 2696 samples within 1 assay 
+#Active assay: Spatial (31053 features, 0 variable features)
+
+# 查看Seurat对象包含的信息
+View(brain)
+# 数据质控，查看原始数据的基本特征
+plot1 <- VlnPlot(brain, features = "nCount_Spatial", pt.size = 0.1) + NoLegend()
+plot2 <- SpatialFeaturePlot(brain, features = "nCount_Spatial") + theme(legend.position = "right")
+wrap_plots(plot1, plot2)
+# 数据标准化，使用SCTransform方法进行标准化
+brain <- SCTransform(brain, assay = "Spatial", verbose = FALSE)
+
+#####################比较SCTransform方法和常规log-normalization的效果###########
+# rerun normalization to store sctransform residuals for all genes
+# SCTransform
+brain <- SCTransform(brain, assay = "Spatial", return.only.var.genes = FALSE, verbose = FALSE)
+
+# also run standard log normalization for comparison
+# NormalizeData
+brain <- NormalizeData(brain, verbose = FALSE, assay = "Spatial")
+
+# Computes the correlation of the log normalized data and sctransform residuals with the number of UMIs
+brain <- GroupCorrelation(brain, group.assay = "Spatial", assay = "Spatial", slot = "data", do.plot = FALSE)
+brain <- GroupCorrelation(brain, group.assay = "Spatial", assay = "SCT", slot = "scale.data", do.plot = FALSE)
+
+p1 <- GroupCorrelationPlot(brain, assay = "Spatial", cor = "nCount_Spatial_cor") + ggtitle("Log Normalization") + 
+  theme(plot.title = element_text(hjust = 0.5))
+p2 <- GroupCorrelationPlot(brain, assay = "SCT", cor = "nCount_Spatial_cor") + ggtitle("SCTransform Normalization") + 
+  theme(plot.title = element_text(hjust = 0.5))
+p1 + p2
+#在上面的箱线图中，我们计算了每个特征（基因）与UMI数量（此处为变量nCount_Spatial）之间的相关性。
+#然后，根据基因的平均表达量将它们进行了分组，最终生成了这些相关系数的箱线图。
+#可以看到，使用常规的NormalizeData进行log-normalization未能使前三组的基因充分归一化，
+#这表明技术因素继续影响高表达的基因的归一化表达估计值。相反，sctransform方法进行归一化可以有效的降低这种影响。
+
+#在Seurat v3.2中，我们加入了新的功能函数来对空间转录组的数据进行可视化的探索。
+#我们将Seurat的SpatialFeaturePlot函数扩展了FeaturePlot, 
+#可以将基因的表达数据还原在样本组织的空间位置上。
+#例如，在这个小鼠大脑切片数据中，Hpca基因是一个强烈的海马区（hippocampal ）marker
+#Ttr是一个脉络丛(choroid plexus)marker。
+SpatialFeaturePlot(brain, features = c("Hpca", "Ttr"))
+#pt.size.factor -- 调整斑点的大小。默认值为1.6
+#alpha -- 调整斑点的最小和最大透明度。默认值为c（1，1）。
+#尝试设置alpha为c（0.1，1），以降低具有较低表达的点的透明度
+p1 <- SpatialFeaturePlot(brain, features = "Ttr", pt.size.factor = 1)
+p2 <- SpatialFeaturePlot(brain, features = "Ttr", alpha = c(0.1, 1))
+p1 + p2
+#数据降维、聚类与可视化
+# PCA降维
+brain <- RunPCA(brain, assay = "SCT", verbose = FALSE)
+# 图聚类分群
+brain <- FindNeighbors(brain, reduction = "pca", dims = 1:30)
+brain <- FindClusters(brain, verbose = FALSE)
+# UMAP降维可视化
+brain <- RunUMAP(brain, reduction = "pca", dims = 1:30)
+p1 <- DimPlot(brain, reduction = "umap", label = TRUE)
+# 使用SpatialDimPlot函数进行可视化
+p2 <- SpatialDimPlot(brain, label = TRUE, label.size = 3)
+p1 + p2
+# 使用cells.highlight参数高亮感兴趣的一些细胞
+SpatialDimPlot(brain, cells.highlight = CellsByIdentities(object = brain, idents = c(1, 2, 5, 3, 4, 8)), facet.highlight = TRUE, ncol = 3)
+#交互式可视化
+SpatialDimPlot(brain, interactive = TRUE)
+LinkedDimPlot(brain)
+##鉴定空间可变基因（Spatially Variable Features）
+#Seurat提供了两种工作流程来识别与组织内空间位置相关的分子特征。
+#第一种方法，可以基于组织内预先标注的解剖区域进行差异表达分析，
+#这可以从非监督聚类或先验知识中确定。
+#在这种情况下，此策略将起作用，因为上面的cluster显示出明显的空间限制。
+de_markers <- FindMarkers(brain, ident.1 = 4, ident.2 = 6)
+SpatialFeaturePlot(object = brain, features = rownames(de_markers)[1:3], alpha = c(0.1, 1), ncol = 3)
+
+#第二种方法，使用FindSpatiallyVariables函数在没有
+#预先注释的情况下鉴定出不同空间模式（spatial patterning）的特征。
+brain <- FindSpatiallyVariableFeatures(brain, assay = "SCT", features = VariableFeatures(brain)[1:1000], selection.method = "markvariogram")
+top.features <- head(SpatiallyVariableFeatures(brain, selection.method = "markvariogram"), 6)
+SpatialFeaturePlot(brain, features = top.features, ncol = 3, alpha = c(0.1, 1))
+
+#############可视化解剖区域的子集#############################
+# 提取子集
+cortex <- subset(brain, idents = c(1, 2, 3, 5, 6, 7))
+# now remove additional cells, use SpatialDimPlots to visualize what to remove
+# SpatialDimPlot(cortex,cells.highlight = WhichCells(cortex, expression = #image_imagerow > 400 | image_imagecol < 150))
+# 根据不同的条件进行筛选提取子集
+cortex <- subset(cortex, anterior1_imagerow > 400 | anterior1_imagecol < 150, invert = TRUE)
+cortex <- subset(cortex, anterior1_imagerow > 275 & anterior1_imagecol > 370, invert = TRUE)
+cortex <- subset(cortex, anterior1_imagerow > 250 & anterior1_imagecol > 440, invert = TRUE)
+# 数据可视化
+p1 <- SpatialDimPlot(cortex, crop = TRUE, label = TRUE)
+p2 <- SpatialDimPlot(cortex, crop = FALSE, label = TRUE, pt.size.factor = 1, label.size = 3)
+p1 + p2
+
+##############整合单细胞RNA-seq测序数据########################
+# 加载单细胞RNA-seq数据
+allen_reference <- readRDS("~/Downloads/allen_cortex.rds")
+# note that setting ncells=3000 normalizes the full dataset but learns noise models on 3k cells this speeds up SCTransform dramatically with no loss in performance
+library(dplyr)
+
+# 进行数据标准化结合PCA降维
+allen_reference <- SCTransform(allen_reference, ncells = 3000, verbose = FALSE) %>% RunPCA(verbose = FALSE) %>% RunUMAP(dims = 1:30)
+
+# After subsetting, we renormalize cortex
+cortex <- SCTransform(cortex, assay = "Spatial", verbose = FALSE) %>% RunPCA(verbose = FALSE)
+
+# the annotation is stored in the 'subclass' column of object metadata
+DimPlot(allen_reference, group.by = "subclass", label = TRUE)
+# 识别整合的anchors
+anchors <- FindTransferAnchors(reference = allen_reference, query = cortex, normalization.method = "SCT")
+# 进行数据映射整合
+predictions.assay <- TransferData(anchorset = anchors, refdata = allen_reference$subclass, prediction.assay = TRUE, weight.reduction = cortex[["pca"]])
+# 添加预测信息
+cortex[["predictions"]] <- predictions.assay
+
+DefaultAssay(cortex) <- "predictions"
+# 数据可视化
+SpatialFeaturePlot(cortex, features = c("L2/3 IT", "L4"), pt.size.factor = 1.6, ncol = 2, crop = TRUE)
+
+#######################使用Seurat处理多个切片数据####################################
+brain2 <- LoadData("stxBrain", type = "posterior1")
+brain2 <- SCTransform(brain2, assay = "Spatial", verbose = FALSE)
+# 使用merge函数合并多个slices
+brain.merge <- merge(brain, brain2)
+
+DefaultAssay(brain.merge) <- "SCT"
+VariableFeatures(brain.merge) <- c(VariableFeatures(brain), VariableFeatures(brain2))
+# 数据降维，聚类与可视化
+brain.merge <- RunPCA(brain.merge, verbose = FALSE)
+brain.merge <- FindNeighbors(brain.merge, dims = 1:30)
+brain.merge <- FindClusters(brain.merge, verbose = FALSE)
+brain.merge <- RunUMAP(brain.merge, dims = 1:30)
+DimPlot(brain.merge, reduction = "umap", group.by = c("ident", "orig.ident"))
+SpatialDimPlot(brain.merge)
+SpatialFeaturePlot(brain.merge, features = c("Hpca", "Plp1"))
