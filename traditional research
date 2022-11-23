@@ -1,0 +1,154 @@
+library(Seurat)
+library(dplyr)
+library(patchwork)
+pbmc.data <- Read10X(data.dir = "singlecellProject/maize/SC22001/L4-1/1.9/")
+# Initialize the Seurat object with the raw (non-normalized data).
+# 初步过滤：每个细胞中至少检测到200个基因，每个基因至少在3个细胞中表达
+pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200)
+pbmc
+# grep MT gene from orgin gff annotation files
+MTgenes <- unlist(read.csv(file = "singlecellProject/maize/SC22001/B73-Mt_Name.csv",header = F))
+table(MTgenes %in% rownames(pbmc))
+MTgenes = MTgenes[MTgenes %in% rownames(pbmc)]
+# grep PT gene from orgin gff annotation files
+PTgenes <- unlist(read.csv(file = "singlecellProject/maize/SC22001/B73-Pt_Name.csv",header = F))
+table(PTgenes %in% rownames(pbmc))
+PTgenes = PTgenes[PTgenes %in% rownames(pbmc)]
+#表达矩阵中的"."表示某一基因在某一细胞中没有检测到表达，因为scRNA-seq的表达矩阵中会存在很多表达量为0的数据，Seurat会使用稀疏矩阵进行数据的存储，可以有效减少存储的内存。
+#在Seurat中可以使用PercentageFeatureSet函数计算每个细胞中线粒体的含量：在人类参考基因中线粒体基因是以“MT-”开头的，而在小鼠中是以“mt-”开头的。
+pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, features = MTgenes)
+pbmc[["percent.pt"]] <- PercentageFeatureSet(pbmc, features = PTgenes)
+# Show QC metrics for the first 5 cells
+head(pbmc@meta.data, 5)
+# Visualize QC metrics as a violin plot
+VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt","percent.pt"), ncol = 4)
+#我们还可以使用FeatureScatter函数来对不同特征-特征之间的关系进行可视化
+plot1 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+#根据QC指标进行细胞和基因的过滤
+pbmc <- subset(pbmc, subset = nFeature_RNA > 500 & nFeature_RNA < 2500 & percent.mt < 5 & percent.pt < 30)
+#归一化,归一化后的数据存放在pbmc[["RNA"]]@data里
+pbmc <- NormalizeData(pbmc, normalization.method = "LogNormalize", scale.factor = 10000)
+#Seurat使用FindVariableFeatures函数鉴定高可变基因，这些基因在PBMC不同细胞之间的表达量差异很大
+#在一些细胞中高表达，在另一些细胞中低表达）。默认情况下，会返回2,000个高可变基因用于下游的分析，如PCA等
+pbmc <- FindVariableFeatures(pbmc, selection.method = "vst", nfeatures = 2000)
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(pbmc), 10)
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(pbmc)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+#数据标准化
+#Seurat使用ScaleData函数对归一化后的count矩阵进行一个线性的变换(“scaling”)，将数据进行标准化
+#ScaleData默认对之前鉴定到的2000个高可变基因进行标准化
+#也可以通过vars.to.regress参数指定其他的变量对数据进行标准化
+#表达矩阵进行scaling后，其结果存储在pbmc[["RNA"]]@scale.data中
+pbmc <- ScaleData(pbmc)
+all.genes <- rownames(pbmc)
+#对所有基因归一化
+pbmc <- ScaleData(pbmc, features = all.genes)
+pbmc <- ScaleData(pbmc, vars.to.regress = c("percent.mt","percent.pt"))
+#进行PCA线性降维
+#Seurat使用RunPCA函数对标准化后的表达矩阵进行PCA降维处理，默认情况下
+#只对前面选出的2000个高可变基因进行线性降维，也可以通过feature参数指定想要降维的数据集。
+pbmc <- RunPCA(pbmc, features = VariableFeatures(object = pbmc))
+# Examine and visualize PCA results a few different ways
+print(pbmc[["pca"]], dims = 1:5, nfeatures = 5)
+
+VizDimLoadings(pbmc, dims = 1:2, reduction = "pca")
+DimPlot(pbmc, reduction = "pca")
+DimHeatmap(pbmc, dims = 1, cells = 500, balanced = TRUE)
+DimHeatmap(pbmc, dims = 1:15, cells = 500, balanced = TRUE)
+#选择PCA降维的维数用于后续的分析
+#Seurat可以使用两种方法确定PCA降维的维数用于后续的聚类分析：
+#1.使用JackStrawPlot函数
+#使用JackStraw函数计算每个PC的P值的分布，显著的PC会有较低的p-value
+pbmc <- JackStraw(pbmc, num.replicate = 100)
+pbmc <- ScoreJackStraw(pbmc, dims = 1:20)
+# 使用JackStrawPlot函数进行可视化
+JackStrawPlot(pbmc, dims = 1:20)
+#使用ElbowPlot函数
+#使用ElbowPlot函数查看在哪一个PC处出现平滑的挂点：
+ElbowPlot(pbmc,ndims = 50)
+#细胞的聚类分群
+#Seurat使用图聚类的方法对降维后的表达数据进行聚类分群
+pbmc <- FindNeighbors(pbmc, dims = 1:30)
+pbmc <- FindClusters(pbmc, resolution = 0.5)
+head(Idents(pbmc), 5)
+#非线性降维可视化（UMAP/tSNE）
+# If you haven't installed UMAP, 
+#you can do so via reticulate::py_install(packages = 'umap-learn')
+# UMAP降维可视化
+pbmc <- RunUMAP(pbmc, dims = 1:40)
+# note that you can set `label = TRUE` or use the LabelClusters function to help label individual clusters
+DimPlot(pbmc, reduction = "umap", label = TRUE)
+#tSNE降维可视化
+pbmc <- RunTSNE(pbmc, dims = 1:40)
+DimPlot(pbmc, reduction = "tsne", label = TRUE)
+#使用该命令查看线粒体叶绿体是否影响分群
+VlnPlot(pbmc, features = c( "percent.mt","percent.pt"), ncol = 2)
+#Seurat使用FindMarkers和FindAllMarkers函数进行差异表达基因的筛选
+#可以通过test.use参数指定不同的差异表达基因筛选的方法。
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+pbmc.markers <- FindAllMarkers(pbmc, only.pos = TRUE, min.pct = 0.1, logfc.threshold = 0.1)
+markgene <- pbmc.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_log2FC)
+
+#Marker基因的可视化
+#Seurat可以使用VlnPlot，FeaturePlot，RidgePlot，DotPlot和DoHeatmap等函数对marker基因的表达进行可视化
+VlnPlot(pbmc, features = c("Zm00004b006064","Zm00004b001338"))
+# you can plot raw counts as well
+VlnPlot(pbmc, features = c("Zm00004b006064","Zm00004b001338"), slot = "counts", log = TRUE)
+FeaturePlot(pbmc, features = c("Zm00004b006064","Zm00004b001338"))
+RidgePlot(pbmc, features = c("Zm00004b006064","Zm00004b001338"))
+DotPlot(pbmc, features = c("Zm00004b006064","Zm00004b001338")) + RotatedAxis()
+top10 <- pbmc.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+DoHeatmap(pbmc, features = top10$gene) + NoLegend()
+#对聚类后的不同类群进行注释
+# 根据marker基因进行分群注释
+new.cluster.ids <- c("leaf mesophyll", "leaf epidermis", "leaf abscission zone")
+names(new.cluster.ids) <- levels(pbmc)
+# 细胞分群的重命名
+pbmc <- RenameIdents(pbmc, new.cluster.ids)
+DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+# 保存分析的结果
+saveRDS(pbmc, file = "../output/pbmc3k_final.rds")
+
+## (2)pK Identification ----------------------------------------------------------
+#这是一个测试最佳参数的过程，运行速度慢
+library(DoubletFinder)
+sweep.res.list_pbmc <- paramSweep_v3(pbmc, PCs = 1:30, sct = FALSE)
+#head(sweep.res.list_keloid)
+sweep.stats_pbmc <- summarizeSweep(sweep.res.list_pbmc, GT = FALSE)
+bcmvn_pbmc <- find.pK(sweep.stats_pbmc) #可以看到最佳参数的点
+## 所以最佳的参数是：
+mpK<-as.numeric(as.vector(bcmvn_pbmc$pK[which.max(bcmvn_pbmc$BCmetric)]))
+
+## (3) Homotypic Doublet Proportion Estimate -------------------------------------
+annotations <- pbmc@meta.data$seurat_clusters
+homotypic.prop <- modelHomotypic(annotations)  
+DoubletRate = ncol(pbmc)*8*1e-6 #按每增加1000个细胞，双细胞比率增加千分之8来计算
+
+#估计同源双细胞比例，根据modelHomotypic()中的参数人为混合双细胞。这里是从seurat_clusters中来混双细胞 
+nExp_poi <- round(DoubletRate*length(pbmc$seurat_clusters))  #最好提供celltype，而不是seurat_clusters。
+# 计算双细胞比例
+nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+## (4)最后，使用确定好的参数鉴定Doublets. Run DoubletFinder with varying classification stringencies ----------------------------------------------------------------
+pbmc <- doubletFinder_v3(pbmc, PCs = 1:10, pN = 0.25, pK = mpK, nExp = nExp_poi, reuse.pANN = FALSE, sct = F)
+pbmc <- doubletFinder_v3(pbmc, PCs = 1:10, pN = 0.25, pK = mpK, nExp = nExp_poi.adj, reuse.pANN = FALSE, sct = F)
+# 使用nExp = nExp_poi和nExp = nExp_poi.adj,分别进行doublets鉴定，以便后续确定哪些细胞是Doublet-High Confidience
+## Plot results ---------------------------------------------------------------------------
+
+pbmc@meta.data[,"DF_hi.lo"] <- pbmc@meta.data$DF.classifications_0.25_0.01_344
+pbmc@meta.data$DF_hi.lo[which(pbmc@meta.data$DF_hi.lo == "Doublet" & pbmc@meta.data$DF.classifications_0.25_0.01_239 == "Singlet")] <- "Doublet-Low Confidience"
+pbmc@meta.data$DF_hi.lo[which(pbmc@meta.data$DF_hi.lo == "Doublet")] <- "Doublet-High Confidience"
+table(pbmc@meta.data$DF_hi.lo)
+# Doublet-High Confidience  Doublet-Low Confidience                  Singlet 
+# 198                       24                     5041 
+
+## 结果展示，分类结果在pbmc@meta.data中
+png("./output/2_cell_annotation/2_doubletFinder.png",2500,1800,res=300)
+DimPlot(pbmc, reduction = "umap", group.by ="DF_hi.lo",cols =c("black","red","gold"))
+dev.off()
+
+saveRDS(keloid, file = "./output/sc_keloid_1_seurat_unanno.rds")
